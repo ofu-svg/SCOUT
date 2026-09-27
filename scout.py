@@ -377,10 +377,22 @@ def build_message(alert):
     """Create SCOUT Telegram alert."""
 
     change = alert["change"]
+    age = alert["age"]
+    name = alert["name"]
+    dex = alert["dex"]
+    liquidity = alert["liquidity"]
+    volume = alert["volume"]
+    url = alert["url"]
 
     return (
+        
         "🚨 SCOUT 🚨\n\n"
         "🔻 SOLANA DIP DETECTED\n\n"
-        f"💎 Pool: {alert['name']}\n"
+        f"💎 Pool: {name}\n"
         f"📉 24H Change: {change:.2f}%\n"
-        f"⏳ Pool Age: {alert['age']:.1f
+        f"⏳ Pool Age: {age:.1f} hours\n"
+        f"🏦 DEX: {dex}\n"
+        f"💧 Liquidity: {format_money(liquidity)}\n"
+        f"📊 24H Volume: {format_money(volume)}\n\n"
+        f"🔗 {url}"
+    )
