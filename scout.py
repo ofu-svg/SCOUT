@@ -480,7 +480,7 @@ def get_eligible_pools():
     combined = []
     seen = set()
 
-    # Maximum 10 from GeckoTerminal
+    # Add maximum 10 from GeckoTerminal
     for pool in gecko[:10]:
 
         attributes = pool.get(
@@ -496,7 +496,7 @@ def get_eligible_pools():
             seen.add(address)
             combined.append(pool)
 
-    # Maximum 10 from DEX Screener
+    # Add maximum 10 from DEX Screener
     for pool in dex[:10]:
 
         address = pool.get(
