@@ -5,6 +5,13 @@ on:
   schedule:
     - cron: "*/10 * * * *"
 
+concurrency:
+  group: scout
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
 jobs:
   scout:
     runs-on: ubuntu-latest
@@ -22,5 +29,23 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scout.py
+
+      - name: Save SCOUT state
+        if: always()
         run: |
-          python scout.py
+          if [ ! -f scout_state.json ]; then
+            echo "No state file created."
+            exit 0
+          fi
+
+          if git diff --quiet -- scout_state.json; then
+            echo "No state changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scout_state.json
+          git commit -m "Update SCOUT observed ATL state"
+          git push
