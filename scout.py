@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SCOUT v5 — Solana observed-ATL radar
+SCOUT v6 — Solana observed 80%-99%+ crash radar
 
 Sources:
   - Raydium
@@ -12,12 +12,13 @@ Rules:
     verifiable creation time.
   - For Orca, whose public pool API does not expose a pool creation
     timestamp, SCOUT requires 48 hours of its own observation history.
-  - Alert only when current USD price is at or within 5% above the
-    lowest price SCOUT has observed for that pool/token.
+  - Require >=80% drawdown from SCOUT's observed high.
+  - Current USD price must also be at or within 5% above
+    the lowest price SCOUT has observed for that pool/token.
   - Maximum 20 alerts per run.
   - 24-hour alert cooldown.
   - No $0.0002 price ceiling.
-  - No -30%, -45%, -50%, -70% or other dip-percentage rule.
+  - Crash threshold: >=80% down from observed high, including >99%.
   - No upward alerts.
   - No GeckoTerminal, DEX Screener, Solscan or Kamino.
 
@@ -36,6 +37,7 @@ from datetime import datetime, timezone
 
 MIN_AGE_HOURS = 48
 ATL_TOLERANCE = 0.05
+MIN_CRASH_PCT = 80.0
 MAX_ALERTS = 20
 ALERT_COOLDOWN_HOURS = 24
 
@@ -125,6 +127,9 @@ def parse_time(value):
 def age_hours(value):
     created = parse_time(value)
     if created is None:
+        return None
+    # A zero/1970 timestamp is not evidence of an ancient Solana pool.
+    if created.year < 2020 or created > now():
         return None
     return (now() - created).total_seconds() / 3600
 
@@ -644,103 +649,103 @@ def save_state(state):
 
 
 def evaluate(candidates, fallback_prices, state):
+    """Require BOTH >=80% observed drawdown and <=5% above observed low.
+
+    Legacy state created by v5 contains a low but no reliable high.
+    Never infer a high from an arbitrary historical low or assume that
+    an initial observation is proof of a crash.
+    """
     alerts = []
     current_time = now_iso()
-
-    # Same source/pool/mint only once.
     unique = {}
 
     for item in candidates:
-        key = (
-            item["source"],
-            item["pool"],
-            item["mint"],
-        )
-
-        # Prefer a candidate that already has a source-provided USD price.
+        key = (item["source"], item["pool"], item["mint"])
         old = unique.get(key)
         if old is None or (
-            old.get("price_usd") is None
-            and item.get("price_usd") is not None
+            number(old.get("price_usd")) is None
+            and number(item.get("price_usd")) is not None
         ):
             unique[key] = item
 
     for item in unique.values():
         price = number(item.get("price_usd"))
-
         if price is None:
             price = fallback_prices.get(item["mint"])
-
         if price is None or price <= 0:
             continue
 
-        key = (
-            f"{item['source']}:"
-            f"{item['pool']}:"
-            f"{item['mint']}"
-        )
+        # Enforce verified age; Orca must have independently built its
+        # >=48h first-seen history before reaching this stage.
+        age = number(item.get("age"))
+        if age is None or age < MIN_AGE_HOURS:
+            continue
 
+        key = f"{item['source']}:{item['pool']}:{item['mint']}"
         record = state.get(key)
-
         if not isinstance(record, dict):
-            # First observation is only a baseline.
             state[key] = {
+                "observed_high": price,
                 "observed_atl": price,
                 "last_price": price,
+                "first_seen": current_time,
                 "last_seen": current_time,
                 "last_alert_at": None,
                 "symbol": item["symbol"],
                 "source": item["source"],
                 "pool": item["pool"],
                 "mint": item["mint"],
-                "age": item["age"],
+                "age": age,
             }
             continue
 
-        atl = number(record.get("observed_atl"))
+        previous_price = number(record.get("last_price"))
+        high = number(record.get("observed_high"))
+        low = number(record.get("observed_atl"))
 
-        if atl is None or atl <= 0:
-            atl = price
+        # Migrate old state without inventing an all-time high.
+        # A previously observed price is valid as an observed sample.
+        if high is None or high <= 0:
+            high = previous_price if previous_price and previous_price > 0 else price
+        if low is None or low <= 0:
+            low = previous_price if previous_price and previous_price > 0 else price
 
-        new_low = price < atl
-
-        if new_low:
-            atl = price
-            record["observed_atl"] = atl
-
+        high = max(high, price)
+        low = min(low, price)
+        record["observed_high"] = high
+        record["observed_atl"] = low
         record["last_price"] = price
         record["last_seen"] = current_time
         record["symbol"] = item["symbol"]
-        record["age"] = item["age"]
+        record["age"] = age
         record["liquidity"] = item["liquidity"]
         record["volume"] = item["volume"]
 
-        distance_pct = ((price / atl) - 1) * 100
-
-        within_atl_band = price <= atl * (1 + ATL_TOLERANCE)
-
-        since_alert = hours_since(
-            record.get("last_alert_at")
+        crash_pct = (1 - price / high) * 100
+        above_low_pct = (price / low - 1) * 100
+        qualifies = (
+            crash_pct >= MIN_CRASH_PCT
+            and price <= low * (1 + ATL_TOLERANCE)
         )
-
+        since_alert = hours_since(record.get("last_alert_at"))
         cooldown_ok = (
-            since_alert is None
-            or since_alert >= ALERT_COOLDOWN_HOURS
+            since_alert is None or since_alert >= ALERT_COOLDOWN_HOURS
         )
-
-        if within_atl_band and cooldown_ok:
+        if qualifies and cooldown_ok:
             alert = dict(item)
-            alert["price_usd"] = price
-            alert["atl"] = atl
-            alert["above_atl_pct"] = distance_pct
-            alert["new_low"] = new_low
-
+            alert.update({
+                "price_usd": price,
+                "observed_high": high,
+                "atl": low,
+                "crash_pct": crash_pct,
+                "above_atl_pct": above_low_pct,
+            })
             alerts.append((key, alert))
 
-    alerts.sort(
-        key=lambda pair: pair[1]["above_atl_pct"]
-    )
-
+    # Deepest observed crashes first; nearest the observed low breaks ties.
+    alerts.sort(key=lambda pair: (
+        -pair[1]["crash_pct"], pair[1]["above_atl_pct"]
+    ))
     return alerts[:MAX_ALERTS]
 
 
@@ -816,10 +821,12 @@ def telegram(message):
 
 def alert_text(item):
     return (
-        "🚨 SCOUT — ATL ALERT 🚨\n\n"
+        "🚨 SCOUT — 80%+ CRASH NEAR LOW 🚨\n\n"
         f"🪙 {item['symbol']}\n"
         f"💰 Current: {fmt_price(item['price_usd'])}\n"
-        f"🔻 Observed ATL: {fmt_price(item['atl'])}\n"
+        f"📈 Observed high: {fmt_price(item['observed_high'])}\n"
+        f"📉 Crash from high: -{item['crash_pct']:.2f}%\n"
+        f"🔻 Observed low: {fmt_price(item['atl'])}\n"
         f"📏 Above ATL: {item['above_atl_pct']:.2f}%\n"
         f"⏳ Pool age: {item['age']:.1f}h\n"
         f"🏦 Source: {item['source']}\n"
@@ -827,16 +834,16 @@ def alert_text(item):
         f"📊 24h volume: {fmt_money(item['volume'])}\n\n"
         f"🧬 Mint:\n{item['mint']}\n\n"
         f"🏊 Pool:\n{item['pool']}\n\n"
-        "RULE: current price is at observed ATL or within 5% above it.\n"
+        "RULE: >=80% below observed high AND within 5% of observed low.\n"
         "ATL is SCOUT's observed history, not a guaranteed lifetime ATL."
     )
 
 
 def main():
     print("=" * 64)
-    print("SCOUT v5 STARTING")
+    print("SCOUT v6 STARTING")
     print("=" * 64)
-    print("Rule: current price <= observed ATL x 1.05")
+    print("Rule: >=80% below observed high AND <=5% above observed low")
     print("Age: >= 48h where verifiable")
     print("Orca: requires 48h of SCOUT observation history")
     print("Maximum alerts: 20")
