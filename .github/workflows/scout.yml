@@ -39,7 +39,7 @@ jobs:
             exit 0
           fi
 
-          if git diff --quiet -- scout_state.json; then
+          if [ -z "$(git status --porcelain -- scout_state.json)" ]; then
             echo "No state changes."
             exit 0
           fi
