@@ -396,3 +396,28 @@ def build_message(alert):
         f"📊 24H Volume: {format_money(volume)}\n\n"
         f"🔗 {url}"
     )
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print("🚨 SCOUT STARTING...")
+
+    pools = get_eligible_pools()
+
+    print(f"Eligible pools found: {len(pools)}")
+
+    alerts = find_dips(pools)
+
+    print(f"Alerts found: {len(alerts)}")
+
+    for alert in alerts:
+        message = build_message(alert)
+        send_telegram(message)
+        print(f"Telegram alert sent: {alert['name']}")
+
+    print("🚨 SCOUT COMPLETE")
+
+
+if __name__ == "__main__":
+    main()
