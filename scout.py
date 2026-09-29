@@ -616,10 +616,12 @@ if mint.startswith("solana_"):
         "",
         1
     )
-            pool_url = (
-                "https://www.geckoterminal.com/"
-                f"solana/pools/{address}"
-            )
+          )
+
+        pool_url = (
+            "https://www.geckoterminal.com/"
+            f"solana/pools/{address}"
+        )
 
         # ====================================================
         # DEX SCREENER FORMAT
