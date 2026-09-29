@@ -458,7 +458,6 @@ def get_dexscreener_pools():
 # ============================================================
 
 def get_eligible_pools():
-def get_eligible_pools():
     """
     Combine GeckoTerminal and DEX Screener.
     10 pools from each source = 20 maximum.
@@ -593,11 +592,30 @@ def find_dips(pools):
             # GeckoTerminal pool API may not expose
             # mint directly in every response.
             # Keep pool address available.
-            mint = attributes.get(
-                "base_token_id",
-                "Not available"
-            )
+            relationships = pool.get(
+    "relationships",
+    {}
+)
 
+base_token_data = relationships.get(
+    "base_token",
+    {}
+).get(
+    "data",
+    {}
+)
+
+mint = base_token_data.get(
+    "id",
+    "Not available"
+)
+
+if mint.startswith("solana_"):
+    mint = mint.replace(
+        "solana_",
+        "",
+        1
+    )
             pool_url = (
                 "https://www.geckoterminal.com/"
                 f"solana/pools/{address}"
