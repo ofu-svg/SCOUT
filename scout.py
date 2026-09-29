@@ -618,7 +618,13 @@ if mint.startswith("solana_"):
     )
           )
 
-        pool_url = (
+
+
+
+
+
+
+pool_url = (
             "https://www.geckoterminal.com/"
             f"solana/pools/{address}"
         )
