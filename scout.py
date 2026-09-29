@@ -458,33 +458,31 @@ def get_dexscreener_pools():
 # ============================================================
 
 def get_eligible_pools():
+def get_eligible_pools():
     """
     Combine GeckoTerminal and DEX Screener.
-
-    Duplicate pool addresses are removed.
-    Maximum remains 20 pools.
+    10 pools from each source = 20 maximum.
     """
 
+    print("🚨 Getting GeckoTerminal pools...")
     gecko = get_gecko_pools()
 
     print(
-        f"GeckoTerminal pools found: "
-        f"{len(gecko)}"
+        f"GeckoTerminal pools found: {len(gecko)}"
     )
 
+    print("🚨 Getting DEX Screener pools...")
     dex = get_dexscreener_pools()
 
     print(
-        f"DEX Screener pools found: "
-        f"{len(dex)}"
+        f"DEX Screener pools found: {len(dex)}"
     )
 
     combined = []
-
     seen = set()
 
-    # Add GeckoTerminal pools first
-    for pool in gecko:
+    # Maximum 10 from GeckoTerminal
+    for pool in gecko[:10]:
 
         attributes = pool.get(
             "attributes",
@@ -496,26 +494,19 @@ def get_eligible_pools():
         )
 
         if address and address not in seen:
-
             seen.add(address)
             combined.append(pool)
 
-    # Add DEX Screener pools
-    for pool in dex:
+    # Maximum 10 from DEX Screener
+    for pool in dex[:10]:
 
         address = pool.get(
             "pairAddress"
         )
 
         if address and address not in seen:
-
             seen.add(address)
             combined.append(pool)
-
-    # Keep maximum 20
-    combined = combined[
-        :MAX_ELIGIBLE_POOLS
-    ]
 
     print(
         f"Combined eligible pools: "
@@ -523,7 +514,6 @@ def get_eligible_pools():
     )
 
     return combined
-
 
 # ============================================================
 # CHECK FOR DIPS
