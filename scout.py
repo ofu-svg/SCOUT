@@ -11,7 +11,8 @@ RULES
 • Alert: -30% or worse over 24 hours
 • No upward alerts
 • No alert for anything better than -30%
-• Telegram credentials come from GitHub Secrets
+• Uses GeckoTerminal + DEX Screener
+• Shows token mint address
 """
 
 import json
@@ -35,9 +36,19 @@ GECKOTERMINAL_URL = (
     "networks/solana/pools"
 )
 
+DEXSCREENER_PROFILES_URL = (
+    "https://api.dexscreener.com/"
+    "token-profiles/latest/v1"
+)
+
+DEXSCREENER_TOKEN_PAIRS_URL = (
+    "https://api.dexscreener.com/"
+    "token-pairs/v1/solana/"
+)
+
 API_HEADERS = {
-    "Accept": "application/json;version=20230302",
-    "User-Agent": "SCOUT-Dip-Radar/1.0"
+    "Accept": "application/json",
+    "User-Agent": "SCOUT-Dip-Radar/2.0"
 }
 
 
@@ -45,18 +56,27 @@ API_HEADERS = {
 # TELEGRAM
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.environ.get(
+    "TELEGRAM_BOT_TOKEN"
+)
+
+TELEGRAM_CHAT_ID = os.environ.get(
+    "TELEGRAM_CHAT_ID"
+)
 
 
 def send_telegram(message):
     """Send one message to Telegram."""
 
     if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is missing"
+        )
 
     if not TELEGRAM_CHAT_ID:
-        raise RuntimeError("TELEGRAM_CHAT_ID is missing")
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID is missing"
+        )
 
     url = (
         "https://api.telegram.org/bot"
@@ -76,8 +96,14 @@ def send_telegram(message):
         method="POST"
     )
 
-    with urllib.request.urlopen(request, timeout=20) as response:
-        result = json.loads(response.read().decode("utf-8"))
+    with urllib.request.urlopen(
+        request,
+        timeout=20
+    ) as response:
+
+        result = json.loads(
+            response.read().decode("utf-8")
+        )
 
     if not result.get("ok"):
         raise RuntimeError(
@@ -98,7 +124,11 @@ def get_json(url):
         method="GET"
     )
 
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(
+        request,
+        timeout=30
+    ) as response:
+
         return json.loads(
             response.read().decode("utf-8")
         )
@@ -128,14 +158,25 @@ def get_pool_age_hours(created_at):
         return None
 
     try:
-        created = datetime.fromisoformat(
-            created_at.replace("Z", "+00:00")
-        )
 
-        if created.tzinfo is None:
-            created = created.replace(
-                tzinfo=timezone.utc
+        if isinstance(created_at, (int, float)):
+            created = datetime.fromtimestamp(
+                created_at / 1000,
+                tz=timezone.utc
             )
+
+        else:
+            created = datetime.fromisoformat(
+                str(created_at).replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+            if created.tzinfo is None:
+                created = created.replace(
+                    tzinfo=timezone.utc
+                )
 
         now = datetime.now(timezone.utc)
 
@@ -167,22 +208,18 @@ def format_money(value):
 
 
 # ============================================================
-# GET ELIGIBLE POOLS
+# GECKOTERMINAL
 # ============================================================
 
-def get_eligible_pools():
+def get_gecko_pools():
     """
-    Scan pool pages until we have up to 20 pools
-    that are at least 48 hours old.
+    Get older Solana pools from GeckoTerminal.
     """
 
     eligible = []
     seen_addresses = set()
 
     page = 1
-
-    # Safety limit so a bad API response cannot
-    # make SCOUT scan forever.
     max_pages = 10
 
     while (
@@ -195,23 +232,33 @@ def get_eligible_pools():
             "sort": "h24_volume_usd_desc"
         })
 
-        url = f"{GECKOTERMINAL_URL}?{query}"
+        url = (
+            f"{GECKOTERMINAL_URL}?{query}"
+        )
 
-        print(f"Scanning GeckoTerminal page {page}...")
+        print(
+            f"Scanning GeckoTerminal page {page}..."
+        )
 
         try:
+
             result = get_json(url)
 
         except Exception as error:
+
             print(
-                f"Could not read page {page}: {error}"
+                f"GeckoTerminal page {page} "
+                f"failed: {error}"
             )
+
             break
 
-        pools = result.get("data", [])
+        pools = result.get(
+            "data",
+            []
+        )
 
         if not pools:
-            print("No more pools returned.")
             break
 
         for pool in pools:
@@ -241,20 +288,19 @@ def get_eligible_pools():
                 created_at
             )
 
-            # If age cannot be verified,
-            # do NOT treat it as an old pool.
             if age_hours is None:
                 continue
 
-            # MUST be 48 hours or older.
             if age_hours < MIN_POOL_AGE_HOURS:
                 continue
+
+            pool["_scout_source"] = "GeckoTerminal"
 
             eligible.append(pool)
 
             print(
-                f"Eligible pool {len(eligible)}/"
-                f"{MAX_ELIGIBLE_POOLS}: "
+                f"Gecko eligible "
+                f"{len(eligible)}: "
                 f"{attributes.get('name', 'Unknown')} "
                 f"({age_hours:.1f}h)"
             )
@@ -264,10 +310,219 @@ def get_eligible_pools():
 
         page += 1
 
-        # Respect the public API.
         time.sleep(0.5)
 
     return eligible
+
+
+# ============================================================
+# DEX SCREENER
+# ============================================================
+
+def get_dexscreener_pools():
+    """
+    Get Solana token profiles from DEX Screener,
+    then inspect their Solana pools.
+    """
+
+    eligible = []
+    seen_pairs = set()
+    seen_tokens = set()
+
+    print(
+        "Scanning DEX Screener token profiles..."
+    )
+
+    try:
+
+        profiles = get_json(
+            DEXSCREENER_PROFILES_URL
+        )
+
+    except Exception as error:
+
+        print(
+            f"DEX Screener profiles failed: "
+            f"{error}"
+        )
+
+        return eligible
+
+    if not isinstance(profiles, list):
+        return eligible
+
+    for profile in profiles:
+
+        if len(eligible) >= MAX_ELIGIBLE_POOLS:
+            break
+
+        if profile.get("chainId") != "solana":
+            continue
+
+        token_address = profile.get(
+            "tokenAddress"
+        )
+
+        if not token_address:
+            continue
+
+        if token_address in seen_tokens:
+            continue
+
+        seen_tokens.add(token_address)
+
+        url = (
+            DEXSCREENER_TOKEN_PAIRS_URL
+            + urllib.parse.quote(
+                token_address,
+                safe=""
+            )
+        )
+
+        try:
+
+            pairs = get_json(url)
+
+        except Exception as error:
+
+            print(
+                f"DEX Screener token failed: "
+                f"{error}"
+            )
+
+            continue
+
+        if not isinstance(pairs, list):
+            continue
+
+        for pair in pairs:
+
+            if len(eligible) >= MAX_ELIGIBLE_POOLS:
+                break
+
+            if pair.get("chainId") != "solana":
+                continue
+
+            pair_address = pair.get(
+                "pairAddress"
+            )
+
+            if not pair_address:
+                continue
+
+            if pair_address in seen_pairs:
+                continue
+
+            seen_pairs.add(pair_address)
+
+            created_at = pair.get(
+                "pairCreatedAt"
+            )
+
+            age_hours = get_pool_age_hours(
+                created_at
+            )
+
+            if age_hours is None:
+                continue
+
+            if age_hours < MIN_POOL_AGE_HOURS:
+                continue
+
+            pair["_scout_source"] = (
+                "DEX Screener"
+            )
+
+            eligible.append(pair)
+
+            base = pair.get(
+                "baseToken",
+                {}
+            )
+
+            print(
+                f"DEX Screener eligible "
+                f"{len(eligible)}: "
+                f"{base.get('symbol', 'Unknown')} / "
+                f"{pair.get('quoteToken', {}).get('symbol', 'Unknown')} "
+                f"({age_hours:.1f}h)"
+            )
+
+            time.sleep(0.1)
+
+    return eligible
+
+
+# ============================================================
+# COMBINE SOURCES
+# ============================================================
+
+def get_eligible_pools():
+    """
+    Combine GeckoTerminal and DEX Screener.
+
+    Duplicate pool addresses are removed.
+    Maximum remains 20 pools.
+    """
+
+    gecko = get_gecko_pools()
+
+    print(
+        f"GeckoTerminal pools found: "
+        f"{len(gecko)}"
+    )
+
+    dex = get_dexscreener_pools()
+
+    print(
+        f"DEX Screener pools found: "
+        f"{len(dex)}"
+    )
+
+    combined = []
+
+    seen = set()
+
+    # Add GeckoTerminal pools first
+    for pool in gecko:
+
+        attributes = pool.get(
+            "attributes",
+            {}
+        )
+
+        address = attributes.get(
+            "address"
+        )
+
+        if address and address not in seen:
+
+            seen.add(address)
+            combined.append(pool)
+
+    # Add DEX Screener pools
+    for pool in dex:
+
+        address = pool.get(
+            "pairAddress"
+        )
+
+        if address and address not in seen:
+
+            seen.add(address)
+            combined.append(pool)
+
+    # Keep maximum 20
+    combined = combined[
+        :MAX_ELIGIBLE_POOLS
+    ]
+
+    print(
+        f"Combined eligible pools: "
+        f"{len(combined)}"
+    )
+
+    return combined
 
 
 # ============================================================
@@ -281,81 +536,171 @@ def find_dips(pools):
 
     for pool in pools:
 
-        attributes = pool.get(
-            "attributes",
-            {}
+        source = pool.get(
+            "_scout_source"
         )
-
-        name = attributes.get(
-            "name",
-            "Unknown Pool"
-        )
-
-        address = attributes.get(
-            "address",
-            ""
-        )
-
-        created_at = attributes.get(
-            "pool_created_at"
-        )
-
-        age_hours = get_pool_age_hours(
-            created_at
-        )
-
-        price_changes = attributes.get(
-            "price_change_percentage",
-            {}
-        )
-
-        h24_change = to_float(
-            price_changes.get("h24")
-        )
-
-        # If price change is unavailable,
-        # do not create an alert.
-        if h24_change is None:
-            continue
 
         # ====================================================
-        # THE MAIN SCOUT RULE
+        # GECKOTERMINAL FORMAT
+        # ====================================================
+
+        if source == "GeckoTerminal":
+
+            attributes = pool.get(
+                "attributes",
+                {}
+            )
+
+            name = attributes.get(
+                "name",
+                "Unknown Pool"
+            )
+
+            address = attributes.get(
+                "address",
+                ""
+            )
+
+            created_at = attributes.get(
+                "pool_created_at"
+            )
+
+            age_hours = get_pool_age_hours(
+                created_at
+            )
+
+            price_changes = attributes.get(
+                "price_change_percentage",
+                {}
+            )
+
+            h24_change = to_float(
+                price_changes.get("h24")
+            )
+
+            liquidity = attributes.get(
+                "reserve_in_usd"
+            )
+
+            volume_data = attributes.get(
+                "volume_usd",
+                {}
+            )
+
+            volume_24h = volume_data.get(
+                "h24"
+            )
+
+            dex_name = attributes.get(
+                "dex_name",
+                "Unknown DEX"
+            )
+
+            base_token = attributes.get(
+                "base_token_price_usd"
+            )
+
+            # GeckoTerminal pool API may not expose
+            # mint directly in every response.
+            # Keep pool address available.
+            mint = attributes.get(
+                "base_token_id",
+                "Not available"
+            )
+
+            pool_url = (
+                "https://www.geckoterminal.com/"
+                f"solana/pools/{address}"
+            )
+
+        # ====================================================
+        # DEX SCREENER FORMAT
+        # ====================================================
+
+        else:
+
+            base = pool.get(
+                "baseToken",
+                {}
+            )
+
+            quote = pool.get(
+                "quoteToken",
+                {}
+            )
+
+            name = (
+                f"{base.get('symbol', 'Unknown')} / "
+                f"{quote.get('symbol', 'Unknown')}"
+            )
+
+            address = pool.get(
+                "pairAddress",
+                ""
+            )
+
+            age_hours = get_pool_age_hours(
+                pool.get("pairCreatedAt")
+            )
+
+            price_change = pool.get(
+                "priceChange",
+                {}
+            )
+
+            h24_change = to_float(
+                price_change.get("h24")
+            )
+
+            liquidity_data = pool.get(
+                "liquidity",
+                {}
+            )
+
+            liquidity = liquidity_data.get(
+                "usd"
+            )
+
+            volume_data = pool.get(
+                "volume",
+                {}
+            )
+
+            volume_24h = volume_data.get(
+                "h24"
+            )
+
+            dex_name = pool.get(
+                "dexId",
+                "Unknown DEX"
+            )
+
+            mint = base.get(
+                "address",
+                "Not available"
+            )
+
+            pool_url = pool.get(
+                "url",
+                ""
+            )
+
+        # ====================================================
+        # MAIN SCOUT RULE
         #
         # -30% or worse = ALERT
-        # -29.99% or better = NO ALERT
-        #
-        # Positive numbers are automatically ignored.
         # ====================================================
+
+        if h24_change is None:
+            continue
 
         if h24_change > DIP_THRESHOLD:
             continue
 
-        volume_data = attributes.get(
-            "volume_usd",
-            {}
-        )
-
-        liquidity = attributes.get(
-            "reserve_in_usd"
-        )
-
-        volume_24h = volume_data.get(
-            "h24"
-        )
-
-        dex_name = attributes.get(
-            "dex_name",
-            "Unknown DEX"
-        )
-
-        pool_url = (
-            "https://www.geckoterminal.com/"
-            f"solana/pools/{address}"
-        )
-
         alert = {
             "name": name,
             "address": address,
+            "mint": mint,
             "change": h24_change,
             "age": age_hours,
             "dex": dex_name,
@@ -379,16 +724,17 @@ def build_message(alert):
     change = alert["change"]
     age = alert["age"]
     name = alert["name"]
+    mint = alert["mint"]
     dex = alert["dex"]
     liquidity = alert["liquidity"]
     volume = alert["volume"]
     url = alert["url"]
 
     return (
-        
         "🚨 SCOUT 🚨\n\n"
         "🔻 SOLANA DIP DETECTED\n\n"
         f"💎 Pool: {name}\n"
+        f"📍 Mint Address:\n{mint}\n"
         f"📉 24H Change: {change:.2f}%\n"
         f"⏳ Pool Age: {age:.1f} hours\n"
         f"🏦 DEX: {dex}\n"
@@ -396,25 +742,42 @@ def build_message(alert):
         f"📊 24H Volume: {format_money(volume)}\n\n"
         f"🔗 {url}"
     )
+
+
 # ============================================================
 # MAIN
 # ============================================================
 
 def main():
+
     print("🚨 SCOUT STARTING...")
 
     pools = get_eligible_pools()
 
-    print(f"Eligible pools found: {len(pools)}")
+    print(
+        f"Eligible pools found: "
+        f"{len(pools)}"
+    )
 
     alerts = find_dips(pools)
 
-    print(f"Alerts found: {len(alerts)}")
+    print(
+        f"Alerts found: "
+        f"{len(alerts)}"
+    )
 
     for alert in alerts:
-        message = build_message(alert)
+
+        message = build_message(
+            alert
+        )
+
         send_telegram(message)
-        print(f"Telegram alert sent: {alert['name']}")
+
+        print(
+            "Telegram alert sent: "
+            f"{alert['name']}"
+        )
 
     print("🚨 SCOUT COMPLETE")
 
